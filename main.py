@@ -8,6 +8,10 @@ from functions import (
     add_venta,
     add_venta_detalle,
     get_ventas,
+    get_detalle_por_venta,
+    get_venta_completa,
+    update_venta_total,
+    procesar_venta_completa_db,
     add_usuario,
     get_usuarios,
     add_proveedor,
@@ -105,37 +109,153 @@ def show_ventas():
     
     st.divider()
 
+    # Inicializar carrito en session_state
+    if "carrito" not in st.session_state:
+        st.session_state["carrito"] = []
+    
     df_productos = get_productos()
     if df_productos.empty:
         st.warning("No hay productos cargados.")
         return
 
-    producto = st.selectbox("Producto", df_productos["nombre"].tolist())
-    cantidad = st.number_input("Cantidad", min_value=1, value=1)
-    descuento = st.slider("Descuento", 0.0, 1.0, 0.0, 0.05)
+    # Mostrar información de debugging
+    st.info(f"🆔 Usuario actual: {st.session_state['username']} (ID: {st.session_state['user_id']})")
+    
+    # Mostrar últimas ventas para verificar
+    st.subheader("📋 Últimas ventas registradas")
+    df_ventas = get_ventas(limit=5)
+    if not df_ventas.empty:
+        st.dataframe(df_ventas, hide_index=True, width='stretch')
+    else:
+        st.info("No hay ventas registradas aún.")
 
-    if st.button("✅ Confirmar venta"):
-        try:
-            # Insertar venta
-            venta_df = add_venta(int(st.session_state["user_id"]), float(descuento))
-            venta_id = int(venta_df.iloc[0]["id"])
-
-            # Insertar detalle
+    st.divider()
+    
+    # === CARRITO DE COMPRAS ===
+    st.subheader("🛒 Carrito de compras")
+    
+    # Mostrar carrito actual
+    if st.session_state["carrito"]:
+        st.write("**Productos en el carrito:**")
+        total_carrito = 0
+        
+        for i, item in enumerate(st.session_state["carrito"]):
+            col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
+            with col1:
+                st.write(f"📦 {item['nombre']}")
+            with col2:
+                st.write(f"${item['precio']:.2f}")
+            with col3:
+                st.write(f"x{item['cantidad']}")
+            with col4:
+                subtotal = item['precio'] * item['cantidad']
+                st.write(f"${subtotal:.2f}")
+                total_carrito += subtotal
+            with col5:
+                if st.button("🗑️", key=f"remove_{i}"):
+                    st.session_state["carrito"].pop(i)
+                    st.rerun()
+        
+        st.write(f"**💰 Total del carrito: ${total_carrito:.2f}**")
+        
+        # Botones para el carrito
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🧹 Limpiar carrito"):
+                st.session_state["carrito"] = []
+                st.rerun()
+        with col2:
+            if st.button("✅ Confirmar venta"):
+                procesar_venta_completa(total_carrito)
+        with col3:
+            if st.button("➕ Agregar más productos"):
+                st.rerun()
+    else:
+        st.info("🛒 El carrito está vacío. Agrega productos para comenzar.")
+    
+    st.divider()
+    
+    # === AGREGAR PRODUCTOS ===
+    st.subheader("➕ Agregar productos al carrito")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        producto = st.selectbox("Producto", df_productos["nombre"].tolist())
+        cantidad = st.number_input("Cantidad", min_value=1, value=1)
+    
+    with col2:
+        # Mostrar información del producto seleccionado
+        if producto:
             prod_row = df_productos[df_productos["nombre"] == producto].iloc[0]
+            st.write(f"**Precio unitario:** ${prod_row['precio']:.2f}")
+            st.write(f"**Stock disponible:** {prod_row['cantidad']}")
             subtotal = cantidad * float(prod_row["precio"])
-            add_venta_detalle(
-                int(venta_id),          # 🔹 asegurar que sea int nativo
-                int(prod_row["id"]),    # 🔹 asegurar que sea int nativo
-                int(cantidad),          # 🔹 por si acaso
-                float(subtotal)         # 🔹 asegurar float nativo
-            )
+            st.write(f"**Subtotal:** ${subtotal:.2f}")
+    
+    if st.button("➕ Agregar al carrito"):
+        if producto and cantidad > 0:
+            prod_row = df_productos[df_productos["nombre"] == producto].iloc[0]
+            
+            # Verificar stock
+            if cantidad > int(prod_row["cantidad"]):
+                st.error(f"❌ No hay suficiente stock. Disponible: {prod_row['cantidad']}")
+            else:
+                # Agregar al carrito
+                nuevo_item = {
+                    "id": int(prod_row["id"]),
+                    "nombre": producto,
+                    "precio": float(prod_row["precio"]),
+                    "cantidad": int(cantidad)
+                }
+                st.session_state["carrito"].append(nuevo_item)
+                st.success(f"✅ {producto} agregado al carrito")
+                st.rerun()
+        else:
+            st.error("❌ Por favor selecciona un producto y cantidad")
 
-            st.success(f"Venta registrada (ID: {venta_id})")
-            time.sleep(2)  # Sleep para que se vea el mensaje
+
+def procesar_venta_completa(total_carrito):
+    """Procesa la venta completa con todos los productos del carrito"""
+    try:
+        # Calcular descuento (por ahora 0, se puede agregar después)
+        descuento = 0.0
+        
+        # Mostrar información antes de crear la venta
+        st.info("🔄 Procesando venta completa...")
+        
+        # Usar la nueva función que maneja todo en una sola transacción
+        success, result = procesar_venta_completa_db(
+            int(st.session_state["user_id"]), 
+            st.session_state["carrito"], 
+            descuento
+        )
+        
+        if success:
+            venta_id = result
+            st.success(f"🎉 Venta registrada exitosamente!")
+            st.success(f"📄 Ticket ID: {venta_id}")
+            st.success(f"📦 Productos: {len(st.session_state['carrito'])}")
+            st.success(f"💰 Total: ${total_carrito:.2f}")
+            
+            # Mostrar el ticket completo
+            st.subheader("📋 Detalle del ticket")
+            detalle_df = get_detalle_por_venta(venta_id)
+            if not detalle_df.empty:
+                st.dataframe(detalle_df, hide_index=True, width='stretch')
+            
+            # Limpiar carrito
+            st.session_state["carrito"] = []
+            
+            time.sleep(3)  # Sleep para que se vea el mensaje
             st.session_state["view"] = "home"
             st.rerun()
-        except Exception as e:
-            st.error(f"Error registrando venta: {e}")
+        else:
+            st.error(f"❌ Error al procesar la venta: {result}")
+            
+    except Exception as e:
+        st.error(f"Error registrando venta: {e}")
+        st.error("Por favor, inténtalo de nuevo")
 
 
 def show_stock():
@@ -191,7 +311,7 @@ def show_abm():
             else:
                 st.error("Error al agregar usuario")
                 time.sleep(2)  # Sleep para que se vea el mensaje
-    st.dataframe(get_usuarios(), hide_index=True, use_container_width=True)
+    st.dataframe(get_usuarios(), hide_index=True, width='stretch')
 
     st.subheader("Proveedores")
     with st.form("form_proveedor"):
@@ -204,7 +324,7 @@ def show_abm():
             else:
                 st.error("Error al agregar proveedor")
                 time.sleep(2)  # Sleep para que se vea el mensaje
-    st.dataframe(get_proveedores(), hide_index=True, use_container_width=True)
+    st.dataframe(get_proveedores(), hide_index=True, width='stretch')
 
     st.subheader("Productos")
     proveedores = get_proveedores()
@@ -223,7 +343,7 @@ def show_abm():
                 else:
                     st.error("Error al agregar producto")
                     time.sleep(2)  # Sleep para que se vea el mensaje
-    st.dataframe(get_productos(), hide_index=True, use_container_width=True)
+    st.dataframe(get_productos(), hide_index=True, width='stretch')
 
 
 def show_reportes():
@@ -236,9 +356,36 @@ def show_reportes():
     
     st.divider()
     
-    df = get_ventas(limit=20)
+    # Mostrar estadísticas generales
+    st.subheader("📊 Estadísticas de ventas")
+    df = get_ventas(limit=50)
     if not df.empty:
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        total_ventas = len(df)
+        st.metric("Total de ventas", total_ventas)
+        
+        # Mostrar tabla de ventas
+        st.subheader("📋 Lista de ventas")
+        st.dataframe(df, hide_index=True, width='stretch')
+        
+        # Permitir ver detalle de una venta específica
+        st.subheader("🔍 Ver detalle de venta")
+        venta_ids = df['id'].tolist()
+        if venta_ids:
+            venta_seleccionada = st.selectbox("Selecciona una venta para ver su detalle:", venta_ids)
+            if st.button("Ver detalle"):
+                venta_info, detalle = get_venta_completa(venta_seleccionada)
+                if not venta_info.empty:
+                    st.subheader(f"📄 Ticket #{venta_seleccionada}")
+                    st.write(f"**Fecha:** {venta_info.iloc[0]['fecha']}")
+                    st.write(f"**Empleado:** {venta_info.iloc[0]['empleado']}")
+                    st.write(f"**Descuento:** {venta_info.iloc[0]['descuento']*100:.1f}%")
+                    st.write(f"**Total:** ${venta_info.iloc[0]['total']:.2f}")
+                    
+                    if not detalle.empty:
+                        st.subheader("📦 Productos vendidos")
+                        st.dataframe(detalle, hide_index=True, width='stretch')
+                    else:
+                        st.info("No hay productos en esta venta")
     else:
         st.info("No hay ventas registradas.")
 

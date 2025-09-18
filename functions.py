@@ -37,7 +37,7 @@ def connect_to_supabase():
         return None
 
 
-def execute_query(query, conn=None, is_select=True, params=None):
+def execute_query(query, conn=None, is_select=True, params=None, commit=True):
     """
     Ejecuta una query SQL. Devuelve un DataFrame si es SELECT,
     o True/False si es DML (INSERT, UPDATE, DELETE).
@@ -60,7 +60,8 @@ def execute_query(query, conn=None, is_select=True, params=None):
             df = pd.DataFrame(results, columns=colnames)
             result = df
         else:
-            conn.commit()
+            if commit:
+                conn.commit()
             result = True
 
         cursor.close()
@@ -134,11 +135,22 @@ def get_productos():
 
 # ---- Ventas ----
 def add_venta(empleado_id, descuento=0):
+    """
+    Crea una nueva venta (ticket) en la base de datos.
+    Cada llamada a esta función crea un NUEVO ticket con un ID único.
+    """
     query = """
         INSERT INTO ventas (empleado_id, descuento, total)
-        VALUES (%s, %s, 0) RETURNING id
+        VALUES (%s, %s, 0) RETURNING id, fecha
     """
-    return execute_query(query, params=(empleado_id, descuento), is_select=True)
+    result = execute_query(query, params=(empleado_id, descuento), is_select=True)
+    
+    if not result.empty:
+        print(f"✅ Nueva venta creada - ID: {result.iloc[0]['id']}, Fecha: {result.iloc[0]['fecha']}")
+    else:
+        print("❌ Error: No se pudo crear la venta")
+    
+    return result
 
 
 def get_ventas(limit=20):
@@ -169,3 +181,97 @@ def get_detalle_por_venta(venta_id):
         WHERE vd.venta_id = %s
     """
     return execute_query(query, params=(venta_id,), is_select=True)
+
+
+def get_venta_completa(venta_id):
+    """
+    Obtiene la información completa de una venta incluyendo el detalle.
+    """
+    # Obtener información de la venta
+    venta_query = """
+        SELECT v.id, v.fecha, v.descuento, v.total, u.usuario AS empleado
+        FROM ventas v
+        JOIN usuarios u ON v.empleado_id = u.id
+        WHERE v.id = %s
+    """
+    venta_info = execute_query(venta_query, params=(venta_id,), is_select=True)
+    
+    # Obtener detalle de la venta
+    detalle = get_detalle_por_venta(venta_id)
+    
+    return venta_info, detalle
+
+
+def update_venta_total(venta_id, total):
+    """
+    Actualiza el total de una venta después de agregar todos los productos.
+    """
+    query = "UPDATE ventas SET total = %s WHERE id = %s"
+    return execute_query(query, params=(total, venta_id), is_select=False)
+
+
+def procesar_venta_completa_db(empleado_id, productos_carrito, descuento=0.0):
+    """
+    Procesa una venta completa con múltiples productos en una sola transacción.
+    Esto evita problemas de claves foráneas.
+    """
+    conn = None
+    try:
+        # Conectar a la base de datos
+        conn = connect_to_supabase()
+        if not conn:
+            return False, "Error de conexión a la base de datos"
+        
+        cursor = conn.cursor()
+        
+        # 1. Crear la venta
+        venta_query = """
+            INSERT INTO ventas (empleado_id, descuento, total)
+            VALUES (%s, %s, 0) RETURNING id
+        """
+        cursor.execute(venta_query, (empleado_id, descuento))
+        venta_id = cursor.fetchone()[0]
+        
+        # 2. Calcular total y agregar detalles
+        total_venta = 0
+        for item in productos_carrito:
+            subtotal = item['precio'] * item['cantidad']
+            total_venta += subtotal
+            
+            # Insertar detalle
+            detalle_query = """
+                INSERT INTO venta_detalle (venta_id, producto_id, cantidad, subtotal)
+                VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(detalle_query, (
+                venta_id,
+                item['id'],
+                item['cantidad'],
+                subtotal
+            ))
+            
+            # Actualizar stock del producto
+            stock_query = """
+                UPDATE productos 
+                SET cantidad = cantidad - %s 
+                WHERE id = %s
+            """
+            cursor.execute(stock_query, (item['cantidad'], item['id']))
+        
+        # 3. Actualizar el total de la venta
+        total_query = "UPDATE ventas SET total = %s WHERE id = %s"
+        cursor.execute(total_query, (total_venta, venta_id))
+        
+        # 4. Confirmar toda la transacción
+        conn.commit()
+        
+        return True, venta_id
+        
+    except Exception as e:
+        print(f"Error procesando venta completa: {e}")
+        if conn:
+            conn.rollback()
+        return False, str(e)
+    finally:
+        if conn:
+            conn.close()
